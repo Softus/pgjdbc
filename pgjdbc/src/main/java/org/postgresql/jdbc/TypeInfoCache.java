@@ -12,6 +12,7 @@ import org.postgresql.core.QueryExecutor;
 import org.postgresql.core.ServerVersion;
 import org.postgresql.core.TypeInfo;
 import org.postgresql.util.GT;
+import org.postgresql.util.PGenum;
 import org.postgresql.util.PGobject;
 import org.postgresql.util.PSQLException;
 import org.postgresql.util.PSQLState;
@@ -22,8 +23,11 @@ import java.sql.SQLException;
 import java.sql.Types;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.Set;
+import java.util.StringTokenizer;
 
 public class TypeInfoCache implements TypeInfo {
 
@@ -48,6 +52,9 @@ public class TypeInfoCache implements TypeInfo {
   // array type oid -> base type array element delimiter
   private Map<Integer, Character> _arrayOidToDelimiter;
 
+  // not enum type cache
+  private Set<String> _pgNotEnumType;
+
   private BaseConnection _conn;
   private final int _unknownLength;
   private PreparedStatement _getOidStatementSimple;
@@ -57,6 +64,7 @@ public class TypeInfoCache implements TypeInfo {
   private PreparedStatement _getArrayElementOidStatement;
   private PreparedStatement _getArrayDelimiterStatement;
   private PreparedStatement _getTypeInfoStatement;
+  private PreparedStatement _getEnumStatement;
 
   // basic pg types info:
   // 0 - type name
@@ -120,6 +128,7 @@ public class TypeInfoCache implements TypeInfo {
     _pgNameToPgObject = new HashMap<String, Class<? extends PGobject>>();
     _pgArrayToPgType = new HashMap<Integer, Integer>();
     _arrayOidToDelimiter = new HashMap<Integer, Character>();
+    _pgNotEnumType = new HashSet<String>();
 
     // needs to be synchronized because the iterator is returned
     // from getPGTypeNamesWithSQLTypes()
@@ -549,8 +558,72 @@ public class TypeInfoCache implements TypeInfo {
     return pgType;
   }
 
-  public synchronized Class<? extends PGobject> getPGobject(String type) {
-    return _pgNameToPgObject.get(type);
+  public synchronized Class<? extends PGobject> getPGobject(String type) throws SQLException {
+    Class klass = (Class)_pgNameToPgObject.get(type);
+
+    if (null == klass) {
+      return getPGenum(type);
+    }
+
+    return klass;
+  }
+
+  public synchronized Class getPGenum(String pgTypeName) throws SQLException {
+    if (!_pgNotEnumType.contains(pgTypeName)) {
+      StringTokenizer st = new StringTokenizer(pgTypeName, "\".");
+      String schema = null;
+      String name = st.nextToken();
+      if (st.hasMoreTokens()) {
+        schema = name;
+        name = st.nextToken();
+      }
+
+      if (_getEnumStatement == null) {
+        String sql;
+        if (_conn.haveMinimumServerVersion(70003)) {
+          sql = "SELECT e.oid, e.enumlabel FROM pg_catalog.pg_enum e "
+            + "JOIN pg_catalog.pg_type t on e.enumtypid = t.oid "
+            + "JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid "
+            + "WHERE t.typname = ? and n.nspname = ? OR ? IS NULL";
+        } else {
+          sql = "SELECT e.oid, e.enumlabel FROM pg_type t, pg_enum e WHERE e.enumtypid = t.oid and t.typname = ?";
+        }
+        _getEnumStatement = _conn.prepareStatement(sql);
+      }
+
+      _getEnumStatement.setString(1, name);
+      if (_conn.haveMinimumServerVersion(70003)) {
+        _getEnumStatement.setString(2, schema);
+        _getEnumStatement.setString(3, schema);
+      }
+
+      HashMap enumValues = null;
+
+      // Go through BaseStatement to avoid transaction start.
+      if (((BaseStatement)_getEnumStatement).executeWithFlags(QueryExecutor.QUERY_SUPPRESS_BEGIN)) {
+        ResultSet rs = _getEnumStatement.getResultSet();
+
+        if (rs.next()) {
+          enumValues = new HashMap();
+          do {
+            enumValues.put(rs.getString(2), Integer.valueOf((int)rs.getLong(1)));
+          } while (rs.next());
+        }
+        rs.close();
+      }
+
+      if (enumValues != null) {
+        PGenum.addEnum(pgTypeName, enumValues);
+        addDataType(pgTypeName, PGenum.class);
+        System.out.println("ENUM: " + pgTypeName);
+
+        return PGenum.class;
+      } else {
+        System.out.println("not enum: " + pgTypeName + " " + name);
+        _pgNotEnumType.add(pgTypeName);
+      }
+    }
+    return null;
   }
 
   public synchronized String getJavaClass(int oid) throws SQLException {

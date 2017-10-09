@@ -83,7 +83,7 @@ public interface TypeInfo {
 
   Iterator<String> getPGTypeNamesWithSQLTypes();
 
-  Class<? extends PGobject> getPGobject(String type);
+  Class<? extends PGobject> getPGobject(String type) throws SQLException;
 
   String getJavaClass(int oid) throws SQLException;
 
