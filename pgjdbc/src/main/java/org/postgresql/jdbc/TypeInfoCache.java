@@ -615,11 +615,9 @@ public class TypeInfoCache implements TypeInfo {
       if (enumValues != null) {
         PGenum.addEnum(pgTypeName, enumValues);
         addDataType(pgTypeName, PGenum.class);
-        System.out.println("ENUM: " + pgTypeName);
 
         return PGenum.class;
       } else {
-        System.out.println("not enum: " + pgTypeName + " " + name);
         _pgNotEnumType.add(pgTypeName);
       }
     }
